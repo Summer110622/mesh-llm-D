@@ -29,10 +29,15 @@ just build
 自宅サーバで mesh-llm を出し、スマホのブラウザやアプリから使います。サーバ側で LAN 公開します：
 
 ```bash
-mesh-llm serve --auto --listen-all --port 9337 --console 3131
+./target/debug/mesh-llm serve --auto --listen-all --port 9337 --console 3131
 ```
 
 スマホのブラウザで `http://<サーバのLANアドレス>:3131` を開くと Web コンソールが使えます。OpenAI 互換 API（`:9337/v1`）にアプリから直接投げることもできます。推論の重い処理はサーバ側で動くので、スマホの電池と発熱の心配はありません。
+
+注意点が2つあります：
+
+- `--listen-all` は API と Web コンソールを全インターフェース（`0.0.0.0`）で待ち受けます。利用者の認証はないため、同じネットワークにいる端末なら誰でも使えます。自宅 LAN など信頼できるネットワークに限って使ってください。
+- 設定の取得・適用やモデルのロード／アンロードなどのランタイム操作 API は、localhost からの接続しか受け付けません（403 になります）。これらの操作はサーバ側で行ってください。
 
 ### Android 端末で直接動かす（実験的）
 
@@ -67,7 +72,7 @@ mesh-llm serve --auto --listen-all --port 9337 --console 3131
 ## 運用ルール
 
 - main は保護されています（承認1名必須・stale 却下・スレッド解決必須・squash のみ）。Organization 管理者のみ PR 要件をバイパスできます。
-- PR タイトルは Conventional Commits（`just check-commits` が検査）。説明は日本語4行（概要・変更・検証・注意点）＋必要に応じ Architecture 節です。
+- コミット件名と PR タイトルは Conventional Commits です。コミットは `just check-commits`、PR タイトルは `python3 scripts/check-conventional-commit.py --message "<タイトル>"` で確認できます。説明は日本語4行（概要・変更・検証・注意点）＋必要に応じ Architecture 節です。
 - ラベルは `perf`・`skippy`・`scheduler`・`cache`・`maintenance`・`documentation`・`ci:canary` を使います。
 - Rust 変更は対象クレートの check・clippy（警告拒否）・関連テストが必須です。ホット4クレートと workspace には `clippy::perf` ゲートがあります。
 
