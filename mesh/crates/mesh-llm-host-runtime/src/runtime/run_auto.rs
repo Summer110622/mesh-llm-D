@@ -1882,6 +1882,7 @@ async fn run_auto_inner(
             console_port,
             options.headless,
         )));
+        super::peer_membership_output::spawn_peer_membership_output(node.clone());
     }
 
     let interactive_started = Arc::new(AtomicBool::new(false));

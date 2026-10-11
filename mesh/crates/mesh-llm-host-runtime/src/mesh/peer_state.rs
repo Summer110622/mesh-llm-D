@@ -582,6 +582,19 @@ impl Node {
             .collect()
     }
 
+    /// Short id and advertised hostname of each admitted peer, for reporting
+    /// membership changes without cloning every `PeerInfo`.
+    pub(crate) async fn admitted_peer_labels(&self) -> Vec<(String, Option<String>)> {
+        self.state
+            .lock()
+            .await
+            .peers
+            .values()
+            .filter(|peer| peer.is_admitted())
+            .map(|peer| (peer.id.fmt_short().to_string(), peer.hostname.clone()))
+            .collect()
+    }
+
     /// Admitted peers minus the ones the operator stopped routing to. Every
     /// path that picks a peer to send a request to reads this, not `peers()`.
     pub(crate) async fn routable_peers(&self) -> Vec<PeerInfo> {
