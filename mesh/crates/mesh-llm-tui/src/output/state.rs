@@ -612,6 +612,11 @@ pub struct DashboardState {
     pub(super) system_disk_path: Option<String>,
     pub(super) system_disk_total_bytes: Option<u64>,
     pub(super) system_disk_available_bytes: Option<u64>,
+    /// Split coordinator and stage assignment, pinned so it stays visible
+    /// after the info event scrolls out of the events panel.
+    pub(super) split_assignment: Option<String>,
+    /// Full stage-zero identity; never infer identity from the display text.
+    pub(super) split_coordinator_id: Option<String>,
     pub(super) llama_instances: Vec<LlamaInstanceState>,
     pub(super) multi_model_mode: Option<MultiModelModeState>,
     pub(super) passive_mode: Option<PassiveModeState>,
@@ -664,6 +669,8 @@ impl Default for DashboardState {
             system_disk_path: None,
             system_disk_total_bytes: None,
             system_disk_available_bytes: None,
+            split_assignment: None,
+            split_coordinator_id: None,
             llama_instances: Vec::new(),
             multi_model_mode: None,
             passive_mode: None,

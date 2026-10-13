@@ -1112,6 +1112,7 @@ impl DashboardState {
 
     pub(super) fn apply_output_event(&mut self, event: &OutputEvent) {
         self.record_startup_history_event(event);
+        self.note_split_assignment(event);
 
         if self.shutdown_in_progress && is_shutdown_suppressed_ready_event(event) {
             return;
