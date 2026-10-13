@@ -627,6 +627,30 @@ impl InferenceBackend for FakeBackend {
                 "stream backend failed",
             ))])));
         }
+        if request.model == "stream-tool-calls" {
+            let model = request.model;
+            let tool_chunk = |calls: Value| {
+                let mut chunk = ChatCompletionChunk::role(model.clone());
+                chunk.choices[0].delta.role = None;
+                chunk.choices[0].delta.tool_calls = Some(calls);
+                chunk
+            };
+            return Ok(Box::pin(stream::iter(vec![
+                Ok(ChatCompletionChunk::delta(model.clone(), "")),
+                Ok(tool_chunk(json!([{
+                    "index": 0, "id": "call_live_1", "type": "function",
+                    "function": {"name": "lookup", "arguments": "{\"city\":"}
+                }]))),
+                Ok(tool_chunk(json!([{
+                    "index": 0, "function": {"arguments": "\"Sydney\"}"}
+                }]))),
+                Ok(ChatCompletionChunk::usage(model.clone(), Usage::new(3, 2))),
+                Ok(ChatCompletionChunk::done_with_reason(
+                    model.clone(),
+                    FinishReason::ToolCalls,
+                )),
+            ])));
+        }
         if request.model == "stream-logprobs" {
             let model = request.model;
             return Ok(Box::pin(stream::iter(vec![
@@ -988,6 +1012,8 @@ async fn models_route_returns_model_list() {
 mod decisions;
 #[path = "router_tests/non_chat.rs"]
 mod non_chat;
+#[path = "router_tests/responses.rs"]
+mod responses;
 #[path = "router_tests/system_one.rs"]
 mod system_one;
 
@@ -1189,69 +1215,6 @@ async fn unconfigured_session_header_is_ignored() {
 }
 
 #[tokio::test]
-async fn responses_conversation_is_normalized_without_leaking_into_chat_body() {
-    let backend = Arc::new(SessionCaptureBackend::default());
-    let app = router_for(backend.clone());
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/responses")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "capture-model",
-                        "conversation": {"id": "conversation-7"},
-                        "input": "hello"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let requests = backend.requests.lock().unwrap();
-    assert_eq!(requests[0].agent_session(), Some("conversation-7"));
-    assert_eq!(
-        requests[0].agent_session_source(),
-        Some("responses.conversation")
-    );
-    assert!(!requests[0].extra.contains_key("conversation"));
-}
-
-#[tokio::test]
-async fn conflicting_header_and_responses_conversation_fail_closed() {
-    let backend = Arc::new(SessionCaptureBackend::default());
-    let app = router_for_with_config(
-        backend.clone(),
-        InferenceFrontendConfig::default()
-            .with_agent_session_header(HeaderName::from_static("x-litellm-session-id")),
-    );
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/responses")
-                .header("content-type", "application/json")
-                .header("x-litellm-session-id", "header-session")
-                .body(Body::from(
-                    json!({
-                        "model": "capture-model",
-                        "conversation": {"id": "body-session"},
-                        "input": "hello"
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert!(backend.requests.lock().unwrap().is_empty());
-}
-
-#[tokio::test]
 async fn request_id_is_returned_on_success_and_errors() {
     let app = router_for(Arc::new(FakeBackend));
     let response = app
@@ -1322,47 +1285,6 @@ async fn hook_minted_capsule_marker_is_exposed_as_x_capsule_id_response_header()
                     json!({
                         "model": "gpt-mesh",
                         "messages": [{"role": "user", "content": "hi"}]
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let header = response
-        .headers()
-        .get("x-capsule-id")
-        .expect("X-Capsule-Id header present")
-        .to_str()
-        .unwrap();
-    assert!(header.starts_with("capsule-chatcmpl"));
-}
-
-/// The same rung-ladder marker must ride out of the non-streaming
-/// `/v1/responses` leg too: it calls the same `chat_completion_with_context`
-/// hook path as `/v1/chat/completions`, but translates the response into a
-/// new `Response` on its way out, which previously dropped the marker
-/// extension before `frontend_lifecycle_middleware` could read it.
-#[tokio::test]
-async fn hook_minted_capsule_marker_is_exposed_on_non_streaming_responses() {
-    let backend = crate::hooks::HookedInferenceBackend::new(
-        Arc::new(FakeBackend),
-        Arc::new(CapsuleMintingHook),
-    );
-    let app = router_for(Arc::new(backend));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/v1/responses")
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    json!({
-                        "model": "gpt-mesh",
-                        "input": "hi"
                     })
                     .to_string(),
                 ))
@@ -1697,26 +1619,6 @@ async fn chat_completion_stream_frames_backend_errors() {
 }
 
 #[tokio::test]
-async fn responses_stream_frames_backend_errors_without_completed_tail() {
-    let response = post_json(
-        "/v1/responses",
-        json!({
-            "model": "stream-error",
-            "input": "hi",
-            "stream": true
-        }),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_body_text(response).await;
-    assert!(body.contains("event: error"));
-    assert!(body.contains(r#""message":"stream backend failed""#));
-    assert!(body.contains(r#""code":"service_unavailable""#));
-    assert!(!body.contains("event: response.completed"));
-    assert!(body.contains("data: [DONE]"));
-}
-
-#[tokio::test]
 async fn dropping_stream_response_cancels_request_context() {
     let token = Arc::new(Mutex::new(None));
     let app = router(Arc::new(CancellationBackend {
@@ -1857,175 +1759,6 @@ async fn chat_completion_route_accepts_noop_parity_fields() {
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
-}
-
-#[tokio::test]
-async fn responses_route_translates_to_chat_and_back() {
-    let response = post_json(
-            "/v1/responses",
-            json!({
-                "model": "test-model",
-                "instructions": "be concise",
-                "input": "hi",
-                "max_output_tokens": 12,
-                "tools": [{"type": "function", "function": {"name": "lookup"}}],
-                "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": {"type": "object"}}},
-                "logprobs": true,
-                "top_logprobs": 1
-            }),
-        )
-        .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_body_json(response).await;
-    assert_eq!(body["object"], "response");
-    assert_eq!(body["output_text"], "echo: be concise\nhi");
-    assert_eq!(body["usage"]["input_tokens"], 3);
-    assert_eq!(body["usage"]["output_tokens"], 2);
-}
-
-#[tokio::test]
-async fn responses_route_preserves_tool_calls_and_logprobs() {
-    let response = post_json(
-        "/v1/responses",
-        json!({
-            "model": "tool-call",
-            "input": "hi",
-            "tools": [{"type": "function", "function": {"name": "lookup"}}],
-            "logprobs": true,
-            "top_logprobs": 1
-        }),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_body_json(response).await;
-    assert_eq!(body["output_text"], "calling lookup");
-    assert_eq!(
-        body["output"][0]["content"][0]["logprobs"]["content"][0]["token"],
-        "calling"
-    );
-    assert_eq!(body["output"][1]["type"], "function_call");
-    assert_eq!(body["output"][1]["call_id"], "call_123");
-    assert_eq!(body["finish_reason"], "tool_calls");
-}
-
-#[tokio::test]
-async fn responses_route_preserves_backend_unsupported_errors() {
-    let response = post_json(
-        "/v1/responses",
-        json!({
-            "model": "unsupported-feature",
-            "input": "hi",
-            "response_format": {
-                "type": "json_schema",
-                "json_schema": {"name": "answer", "schema": {"type": "object"}}
-            }
-        }),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body = response_body_json(response).await;
-    assert_eq!(body["error"]["code"], "unsupported_model_feature");
-    assert!(
-        body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("structured output")
-    );
-}
-
-#[tokio::test]
-async fn guarded_chat_rescues_tool_call_text() {
-    let backend = Arc::new(GuardrailRescueBackend::default());
-    let app = guarded_test_app(backend.clone());
-
-    let response = post_json_with_app_and_request_id(
-        app,
-        "/v1/chat/completions",
-        json!({
-            "model": "Qwen3-8B-Q4_K_M",
-            "messages": [{"role": "user", "content": "weather"}],
-            "tools": [{"type": "function", "function": {"name": "lookup"}}],
-            "tool_choice": "auto"
-        }),
-        Some("a35bb624-5c07-431f-92a9-9c884472ca95"),
-    )
-    .await;
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response.headers()["x-request-id"],
-        "a35bb624-5c07-431f-92a9-9c884472ca95"
-    );
-    let body = response_body_json(response).await;
-    assert_eq!(body["object"], "chat.completion");
-    assert!(body["choices"][0]["message"]["content"].is_null());
-    assert_eq!(body["choices"][0]["finish_reason"], "tool_calls");
-    assert_eq!(
-        body["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
-        "lookup"
-    );
-    assert_eq!(
-        body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"],
-        "{\"city\":\"Sydney\"}"
-    );
-    assert!(!serde_json::to_string(&body).unwrap().contains("_mesh_"));
-
-    let seen_requests = backend.seen_chat_requests.lock().unwrap();
-    assert_eq!(seen_requests.len(), 1);
-    let seen_tools = seen_requests[0]
-        .tools
-        .as_ref()
-        .and_then(Value::as_array)
-        .cloned()
-        .expect("guarded backend should receive tools");
-    assert_eq!(seen_tools.len(), 2);
-    assert_eq!(seen_tools[0]["function"]["name"], "lookup");
-    assert_eq!(seen_tools[1]["function"]["name"], "_mesh_respond");
-}
-
-#[tokio::test]
-async fn responses_stream_route_returns_responses_sse() {
-    let response = post_json(
-        "/v1/responses",
-        json!({
-            "model": "test-model",
-            "input": "hi",
-            "stream": true,
-            "stream_options": {"include_usage": true}
-        }),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_body_text(response).await;
-    assert!(body.contains("event: response.created"));
-    assert!(body.contains("event: response.output_item.added"));
-    assert!(body.contains("event: response.content_part.added"));
-    assert!(body.contains("event: response.output_text.delta"));
-    assert!(body.contains("event: response.output_text.done"));
-    assert!(body.contains("event: response.content_part.done"));
-    assert!(body.contains("event: response.output_item.done"));
-    assert!(body.contains("event: response.completed"));
-    assert!(body.contains(r#""sequence_number":1"#));
-    assert!(body.contains(r#""output_text":"hello""#));
-    assert!(body.contains("data: [DONE]"));
-}
-
-#[tokio::test]
-async fn responses_stream_route_preserves_logprobs() {
-    let response = post_json(
-        "/v1/responses",
-        json!({
-            "model": "stream-logprobs",
-            "input": "hi",
-            "stream": true,
-            "logprobs": true
-        }),
-    )
-    .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = response_body_text(response).await;
-    assert!(body.contains("event: response.output_text.delta"));
-    assert!(body.contains(r#""logprobs":{"content":[{"logprob":-0.1,"token":"tok"}]}"#));
 }
 
 #[tokio::test]

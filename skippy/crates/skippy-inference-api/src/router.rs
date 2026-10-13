@@ -17,7 +17,7 @@ use axum::{
         header::{self, HeaderName},
     },
     middleware::{self, Next},
-    response::{IntoResponse, Response, sse::Event},
+    response::{IntoResponse, Response},
     routing::{get, post},
 };
 use futures_util::{StreamExt, stream};
@@ -46,13 +46,8 @@ use crate::{
     request_lifecycle::RequestLifecycle,
     rerank::{RerankRequest, RerankResponse},
     responses::{
-        ResponseAdapterMode, ResponseSseState, chunk_delta_text, normalize_openai_compat_request,
-        responses_stream_completed_event_with_sequence, responses_stream_content_part_added_event,
-        responses_stream_content_part_done_event, responses_stream_created_event_with_sequence,
-        responses_stream_delta_event_with_logprobs_and_sequence,
-        responses_stream_output_item_added_event, responses_stream_output_item_done_event,
-        responses_stream_text_done_event_with_sequence,
-        translate_chat_completion_response_to_responses, usage_to_responses_usage,
+        ResponseAdapterMode, live_stream, normalize_openai_compat_request,
+        translate_chat_completion_response_to_responses,
     },
     sse::{done_event, json_event},
     stream_lifecycle::{
@@ -729,7 +724,9 @@ async fn stream_responses(
     let include_usage = request.include_usage();
     let backend_context = request_context(context.request_id, trusted_agent_session, true);
     let cancellation = backend_context.cancellation_token();
-    let state_machine = Arc::new(Mutex::new(ResponseSseState::new(request.model.clone())));
+    let state_machine = Arc::new(Mutex::new(live_stream::ResponseSseState::new(
+        request.model.clone(),
+    )));
     let stream = call_backend_with_context(
         state.config.lifecycle_observer.clone(),
         context,
@@ -752,11 +749,11 @@ async fn stream_responses(
     let body_state = state_machine.clone();
     let usage_lifecycle = lifecycle.clone();
     let body_events = stream.flat_map(move |item| {
-        let out = responses_stream_body_events(&body_state, &usage_lifecycle, item);
+        let out = live_stream::body_events(&body_state, &usage_lifecycle, item);
         stream::iter(out.into_iter().map(Ok::<_, Infallible>))
     });
     let tail_events =
-        stream::once(async move { responses_stream_tail_events(&state_machine, include_usage) })
+        stream::once(async move { live_stream::tail_events(&state_machine, include_usage) })
             .flat_map(|out| stream::iter(out.into_iter().map(Ok::<_, Infallible>)));
     let completion_lifecycle = lifecycle.clone();
     let events = body_events
@@ -814,198 +811,6 @@ async fn non_streaming_responses(
             .insert(ExchangeIdExtension(exchange_id));
     }
     Ok(http_response)
-}
-
-fn responses_stream_body_events(
-    state_machine: &Mutex<ResponseSseState>,
-    usage_lifecycle: &StreamLifecycle,
-    item: InferenceResult<ChatCompletionChunk>,
-) -> Vec<Event> {
-    let mut state_machine = state_machine
-        .lock()
-        .expect("responses stream state lock poisoned");
-    if state_machine.failed {
-        return Vec::new();
-    }
-    let mut out = Vec::new();
-    match item {
-        Ok(chunk) => {
-            if !state_machine.created_emitted {
-                state_machine.model = chunk.model.clone();
-                let sequence_number = state_machine.next_sequence_number();
-                out.push(
-                    Event::default()
-                        .event("response.created")
-                        .json_data(responses_stream_created_event_with_sequence(
-                            &state_machine.model,
-                            state_machine.created_at,
-                            sequence_number,
-                        ))
-                        .unwrap_or_else(|_| Event::default().data("{}")),
-                );
-                state_machine.created_emitted = true;
-            }
-            if let Some(delta) = chunk_delta_text(&chunk) {
-                if !state_machine.output_item_emitted {
-                    let sequence_number = state_machine.next_sequence_number();
-                    out.push(
-                        Event::default()
-                            .event("response.output_item.added")
-                            .json_data(responses_stream_output_item_added_event(
-                                &state_machine.item_id,
-                                sequence_number,
-                            ))
-                            .unwrap_or_else(|_| Event::default().data("{}")),
-                    );
-                    let sequence_number = state_machine.next_sequence_number();
-                    out.push(
-                        Event::default()
-                            .event("response.content_part.added")
-                            .json_data(responses_stream_content_part_added_event(
-                                &state_machine.item_id,
-                                sequence_number,
-                            ))
-                            .unwrap_or_else(|_| Event::default().data("{}")),
-                    );
-                    state_machine.output_item_emitted = true;
-                }
-                let logprobs = chunk
-                    .choices
-                    .first()
-                    .and_then(|choice| choice.logprobs.clone());
-                state_machine.output_text.push_str(&delta);
-                let sequence_number = state_machine.next_sequence_number();
-                out.push(
-                    Event::default()
-                        .event("response.output_text.delta")
-                        .json_data(responses_stream_delta_event_with_logprobs_and_sequence(
-                            &state_machine.item_id,
-                            &delta,
-                            logprobs,
-                            sequence_number,
-                        ))
-                        .unwrap_or_else(|_| Event::default().data("{}")),
-                );
-            }
-            if let Some(usage) = chunk.usage.as_ref() {
-                usage_lifecycle.capture_usage(usage);
-                state_machine.usage = Some(usage_to_responses_usage(usage));
-            }
-        }
-        Err(error) => {
-            state_machine.failed = true;
-            out.push(
-                Event::default()
-                    .event("error")
-                    .json_data(error.body())
-                    .unwrap_or_else(|_| Event::default().data("{}")),
-            );
-        }
-    }
-    out
-}
-
-fn responses_stream_tail_events(
-    state_machine: &Mutex<ResponseSseState>,
-    include_usage: bool,
-) -> Vec<Event> {
-    let mut state_machine = state_machine
-        .lock()
-        .expect("responses stream state lock poisoned");
-    let mut out = Vec::new();
-    if state_machine.failed {
-        return out;
-    }
-    if !state_machine.created_emitted {
-        let sequence_number = state_machine.next_sequence_number();
-        out.push(
-            Event::default()
-                .event("response.created")
-                .json_data(responses_stream_created_event_with_sequence(
-                    &state_machine.model,
-                    state_machine.created_at,
-                    sequence_number,
-                ))
-                .unwrap_or_else(|_| Event::default().data("{}")),
-        );
-        state_machine.created_emitted = true;
-    }
-    if !state_machine.output_item_emitted {
-        let sequence_number = state_machine.next_sequence_number();
-        out.push(
-            Event::default()
-                .event("response.output_item.added")
-                .json_data(responses_stream_output_item_added_event(
-                    &state_machine.item_id,
-                    sequence_number,
-                ))
-                .unwrap_or_else(|_| Event::default().data("{}")),
-        );
-        let sequence_number = state_machine.next_sequence_number();
-        out.push(
-            Event::default()
-                .event("response.content_part.added")
-                .json_data(responses_stream_content_part_added_event(
-                    &state_machine.item_id,
-                    sequence_number,
-                ))
-                .unwrap_or_else(|_| Event::default().data("{}")),
-        );
-        state_machine.output_item_emitted = true;
-    }
-    let sequence_number = state_machine.next_sequence_number();
-    out.push(
-        Event::default()
-            .event("response.output_text.done")
-            .json_data(responses_stream_text_done_event_with_sequence(
-                &state_machine.item_id,
-                &state_machine.output_text,
-                sequence_number,
-            ))
-            .unwrap_or_else(|_| Event::default().data("{}")),
-    );
-    let sequence_number = state_machine.next_sequence_number();
-    out.push(
-        Event::default()
-            .event("response.content_part.done")
-            .json_data(responses_stream_content_part_done_event(
-                &state_machine.item_id,
-                &state_machine.output_text,
-                sequence_number,
-            ))
-            .unwrap_or_else(|_| Event::default().data("{}")),
-    );
-    let sequence_number = state_machine.next_sequence_number();
-    out.push(
-        Event::default()
-            .event("response.output_item.done")
-            .json_data(responses_stream_output_item_done_event(
-                &state_machine.item_id,
-                &state_machine.output_text,
-                sequence_number,
-            ))
-            .unwrap_or_else(|_| Event::default().data("{}")),
-    );
-    let sequence_number = state_machine.next_sequence_number();
-    out.push(
-        Event::default()
-            .event("response.completed")
-            .json_data(responses_stream_completed_event_with_sequence(
-                &state_machine.response_id,
-                state_machine.created_at,
-                &state_machine.model,
-                &state_machine.item_id,
-                &state_machine.output_text,
-                if include_usage {
-                    state_machine.usage.clone()
-                } else {
-                    None
-                },
-                sequence_number,
-            ))
-            .unwrap_or_else(|_| Event::default().data("{}")),
-    );
-    out
 }
 
 async fn completions(
