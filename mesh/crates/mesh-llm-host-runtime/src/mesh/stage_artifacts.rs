@@ -245,6 +245,7 @@ impl Node {
         request_kind: &str,
         mut request: crate::inference::skippy::StageControlRequest,
     ) -> anyhow::Result<crate::inference::skippy::StageControlResponse> {
+        super::stage_control_identity::validate_coordinator_identity(remote, &request)?;
         // Keep claims and loads ordered while authorization and source
         // resolution run. The load is enqueued before another claim can pass
         // this gate, so a validated claim cannot become stale mid-resolution.
