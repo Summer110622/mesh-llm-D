@@ -127,6 +127,43 @@ async fn test_api_chat_smoke_for_audio_request() {
 }
 
 #[tokio::test]
+async fn test_v1_passthrough_preserves_non_utf8_request_bytes() {
+    let (upstream_port, upstream_rx, upstream_handle) =
+        spawn_capturing_upstream(r#"{"text":"ok"}"#).await;
+    let state = build_test_mesh_api_with_api_port(upstream_port).await;
+    state.update(true, true).await;
+    let (addr, handle) = spawn_management_test_server(state).await;
+
+    let boundary = "mesh-audio-boundary";
+    let mut body = format!(
+        "--{boundary}\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\ntest-model\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"clip.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(b"RIFF\xff\x00\x10WAVE");
+    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+    let mut request = format!(
+        "POST /v1/audio/transcriptions HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    request.extend_from_slice(&body);
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+    stream.write_all(&request).await.unwrap();
+    stream.shutdown().await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let raw = upstream_rx.await.unwrap();
+
+    assert!(response.starts_with(b"HTTP/1.1 200 OK"));
+    assert!(raw.starts_with(b"POST /v1/audio/transcriptions HTTP/1.1"));
+    assert!(raw.ends_with(&body));
+
+    handle.abort();
+    let _ = upstream_handle.await;
+}
+
+#[tokio::test]
 async fn test_api_responses_smoke_for_image_request() {
     let (upstream_port, upstream_rx, upstream_handle) =
             spawn_capturing_upstream(r#"{"id":"chatcmpl","object":"chat.completion","created":1,"model":"test-model","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#).await;

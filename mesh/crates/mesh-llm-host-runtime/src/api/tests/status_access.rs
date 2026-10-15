@@ -57,7 +57,6 @@ async fn dispatch(
             path,
             path,
             "",
-            &request,
             request.as_bytes(),
         ))
         .await

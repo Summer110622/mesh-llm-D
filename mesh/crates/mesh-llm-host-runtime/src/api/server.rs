@@ -203,7 +203,6 @@ pub(crate) async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> an
     let Some(request) = read_management_request(&mut stream).await? else {
         return Ok(());
     };
-    let req = String::from_utf8_lossy(&request.raw);
     let method = request.method.as_str();
     let path = request.path.as_str();
     let path_only = path.split('?').next().unwrap_or(path);
@@ -233,7 +232,6 @@ pub(crate) async fn handle_request(mut stream: TcpStream, state: &MeshApi) -> an
         path,
         path_only,
         body,
-        req.as_ref(),
         &request.raw,
     );
     if super::management_lifecycle::eligible_management_route(method, path_only) {
@@ -260,7 +258,6 @@ pub(super) async fn dispatch_management_request(
     path: &str,
     path_only: &str,
     body: &str,
-    req: &str,
     raw_request: &[u8],
 ) -> anyhow::Result<()> {
     if method == "GET" && state.is_headless().await && is_ui_only_route(path_only) {
@@ -310,7 +307,6 @@ pub(super) async fn dispatch_management_request(
                 path,
                 path_only,
                 body,
-                req,
                 raw_request,
                 super::routes::chat::CallerTrust::from_trusted_local(trusted_local_request),
             )

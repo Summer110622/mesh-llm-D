@@ -1,4 +1,5 @@
 use super::super::{MeshApi, http::respond_error};
+use std::borrow::Cow;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -41,7 +42,7 @@ pub(super) async fn handle(
     state: &MeshApi,
     method: &str,
     path_only: &str,
-    req: &str,
+    raw_request: &[u8],
     caller: CallerTrust,
 ) -> anyhow::Result<()> {
     let is_openai_passthrough = path_only.starts_with("/v1/") || path_only == "/models";
@@ -87,13 +88,13 @@ pub(super) async fn handle(
                 )?),
             };
             let rewritten = if is_openai_passthrough {
-                req.to_string()
+                Cow::Borrowed(raw_request)
             } else if path_only.starts_with("/api/chat") {
-                req.replacen("/api/chat", upstream_path, 1)
+                Cow::Owned(replace_first(raw_request, "/api/chat", upstream_path))
             } else {
-                req.replacen("/api/responses", upstream_path, 1)
+                Cow::Owned(replace_first(raw_request, "/api/responses", upstream_path))
             };
-            upstream.write_all(rewritten.as_bytes()).await?;
+            upstream.write_all(&rewritten).await?;
             relay_upstream_response(stream, &mut upstream).await?;
         }
         _ => {
@@ -132,6 +133,16 @@ async fn relay_upstream_response(
     client.write_all(&head).await?;
     tokio::io::copy_bidirectional(client, upstream).await?;
     Ok(())
+}
+
+fn replace_first(raw: &[u8], from: &str, to: &str) -> Vec<u8> {
+    let Some(start) = raw
+        .windows(from.len())
+        .position(|window| window == from.as_bytes())
+    else {
+        return raw.to_vec();
+    };
+    [&raw[..start], to.as_bytes(), &raw[start + from.len()..]].concat()
 }
 
 /// Offset of the start of the blank line terminating the response head
