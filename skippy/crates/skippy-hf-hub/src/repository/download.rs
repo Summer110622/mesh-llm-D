@@ -73,6 +73,7 @@ impl<T: RepoType> HFRepository<T> {
     }
 
     async fn download_file_inner(&self, params: &DownloadFileParams) -> HFResult<PathBuf> {
+        ensure_relative_filename(&params.filename)?;
         if params.local_dir.is_some() {
             self.download_file_to_local_dir(params).await
         } else {
@@ -1160,6 +1161,18 @@ impl<T: RepoType> HFRepository<T> {
     }
 }
 
+fn ensure_relative_filename(filename: &str) -> HFResult<()> {
+    let mut components = Path::new(filename).components().peekable();
+    if components.peek().is_some()
+        && components.all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return Ok(());
+    }
+    Err(HFError::InvalidParameter(format!(
+        "filename must be a relative path without `.` or `..` components: {filename:?}"
+    )))
+}
+
 async fn mark_no_exist_and_return_error(
     cache_dir: &Path,
     repo_folder: &str,
@@ -1715,6 +1728,7 @@ mod tests {
     use super::content_range_matches;
     use crate::HFClientBuilder;
     use crate::cache::storage as cache;
+    use crate::error::HFError;
 
     const TEST_COMMIT: &str = "0123456789012345678901234567890123456789";
     const TEST_ETAG: &str = "etag-http";
@@ -1771,6 +1785,32 @@ mod tests {
                 .iter()
                 .any(|range| range.as_deref() == Some("bytes=4-"))
         );
+    }
+
+    #[tokio::test]
+    async fn cache_download_rejects_filename_escaping_the_snapshot() {
+        let body = Arc::new(b"abcdefghij".to_vec());
+        let ranges = Arc::new(Mutex::new(Vec::new()));
+        let endpoint = start_http_resume_server(body, ranges, false).await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("cache");
+        let client = HFClientBuilder::new()
+            .endpoint(endpoint)
+            .cache_dir(&cache_dir)
+            .build()
+            .unwrap();
+        let error = client
+            .model("owner", "repo")
+            .download_file()
+            .filename("../../../../escaped.gguf")
+            .revision("main")
+            .send()
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, HFError::InvalidParameter(_)), "{error}");
+        assert!(!dir.path().join("escaped.gguf").exists());
     }
 
     #[tokio::test]
