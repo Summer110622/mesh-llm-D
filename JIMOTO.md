@@ -136,6 +136,19 @@ curl -s http://localhost:9337/v1/images/generations \
 - ラベルは `perf`・`skippy`・`scheduler`・`cache`・`maintenance`・`documentation`・`ci:canary` に加え、フォーク独自の `jimoto`・`upstream-sync`・`mobile` を使います。
 - Rust 変更は対象クレートの check・clippy（警告拒否）・関連テストが必須です。ホット4クレートと workspace には `clippy::perf` ゲートがあります。
 
+## 自動検証（CI）
+
+- PR 用のワークフロー（`PR · Quality` / `PR · Linux` / `PR · macOS` / `PR · Windows` など）はリポジトリに定義されています。ただし **このフォークでは 2026-10-16 時点で `pull_request` / `push` を契機に実行されていません**（実行履歴は 0 件のまま。PR を実際に作成して確認）。Organization 側の Actions ポリシーが原因と考えられ、確認・変更にはオーナー権限（`admin:org`）が必要です。
+- 手動実行は動作します。`gh workflow run "CI · Manual Full"` でプラットフォーム別レーン（`CI · Linux` / `CI · macOS` / `CI · Windows` / `CI · Quality` / `CI · Website`）が起動することを確認済みです。
+- したがって **PR を出す前に手元で最低限のゲートを回してください**。自動検証が動かない現状では、これが唯一の定型チェックです。
+
+  ```bash
+  just check-pr            # origin/main との差分から対象クレートを判定して fmt / clippy / test
+  just check-pr <base>     # 比較先を変える場合
+  ```
+
+  `just` が無い環境では `bash scripts/check-pr.sh origin/main` を直接実行してください。作業ツリーの未コミット変更と未追跡ファイルも対象に含まれます。
+
 ## 上流への追従
 
 - 定期的に `Mesh-LLM/mesh-llm` の main を取り込みます。
